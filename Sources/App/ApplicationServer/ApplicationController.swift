@@ -17,6 +17,7 @@
 /// limitations under the License.
 
 import Vapor
+import Redis
 
 
 /// Application Session controller
@@ -28,7 +29,19 @@ import Vapor
 
 final class ApplicationController: Service {
     
-    final private var appSessions:[ApplicationSession] = []
+    ///is a server Key
+    final public var key = UUID()
+    
+    struct rawSessionHandler {
+        var session: ApplicationSession
+        var channel: WebSocket
+        var redisChannel: RedisClient
+        var httpRequest: Request
+    }
+    final private var handledSessions:[rawSessionHandler] = []
+    //final private var handledSessions = Set<rawSessionHandler>()
+    
+    
     
     init(){
         //appSessions.removeAll()
@@ -36,16 +49,106 @@ final class ApplicationController: Service {
     
     deinit {
         /// all application session are destroyed
-        self.appSessions.removeAll()
+        self.handledSessions.removeAll()
     }
     
     func ConnectSessionTo(channel: WebSocket, request: Request){
-
-        let newSession = ApplicationSession(socket: channel, controller: self)
-        self.appSessions.append(newSession)
         
+        let _ = request.withPooledConnection(to: .redis, closure: {
+            [weak self, unowned channel, unowned request]
+            (connection) -> Future<Void> in
+            
+            ///if a connection on redis is active create a new application session and old
+            let newSession = ApplicationSession(appId: ApplicationIdentity(), controller: self!)
+            self!.handledSessions.append(rawSessionHandler(session: newSession, channel: channel, redisChannel:connection, httpRequest: request))
+            
+            print("connected")
+            
+            let  _ = try! connection.subscribe([ "randomStringHere.pippo"], subscriptionHandler: {
+                (rData) in
+                
+               // print(rData.data.string)
+                channel.send("Redis message: \(rData.data.string)")
+                return
+            })
+            
+            /// setted for olding in websocket closure
+            let idxSession = self!.handledSessions.count - 1
+            guard idxSession>0 else {return request.future()}
+            let keySession = self!.handledSessions.last!.session.key
+            
+            ///************** Connect to websocket handler**************
+            
+            ///**websocket HeartBeat timed to 30 second**
+            channel.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(15), delay: .seconds(30)) {
+                [weak self]
+                task -> Void in
+                
+                ///owned by closure
+                let keySessionIdx = keySession
+                let rawIdx = self!.handledSessions.firstIndex(where: { $0.session.key == keySessionIdx})
+                guard (rawIdx != nil) else {return}
+                
+                /// check if the socket was cloded
+                guard !channel.isClosed else {
+                    task.cancel()
+                    return
+                }
+                
+                // send the heartbeat signal
+                print("ping: \(self!.handledSessions[rawIdx!].session.subscriptionKey)")
+                channel.send(raw: (self!.handledSessions[rawIdx!].session.subscriptionKey), opcode: .ping)
+            }
+            
+            ///**websocket close handler**
+            channel.onCloseCode {
+                [weak self]
+                (WebSocketErrorCode) in
+                
+                ///owned by closure
+                let keySessionIdx = keySession
+                let rawIdx = self!.handledSessions.firstIndex(where: { $0.session.key == keySessionIdx})
+                //let rawIdx = self!.handledSessions.firstIndex(where: { $0.channel == channel})
+                guard (rawIdx != nil) else {return}
+                
+                self?.handledSessions[rawIdx!].redisChannel.close()
+                print("closed")
+                
+                self?.handledSessions.remove(at: rawIdx!)
+            }
+            
+            ///**web socket message received**
+            channel.onText {
+                [weak self]
+                (ws, text) in
+                
+                ///owned by closure
+                let keySessionIdx = keySession
+                let rawIdx = self!.handledSessions.firstIndex(where: { $0.session.key == keySessionIdx})
+                
+                    // Simply echo any received text
+                ws.send("message: \(text)")
+            }
+            
+            ///**websocket error handler**
+            channel.onError {
+                [weak self]
+                (ws, error) in
+                
+                ///owned by closure
+                let keySessionIdx = keySession
+                let rawIdx = self!.handledSessions.firstIndex(where: { $0.session.key == keySessionIdx})
+                print(error)
+            }
+            
+            return request.future()
+        }).catchFlatMap({ (errr) -> (EventLoopFuture<Void>) in
+            print("error get redis pool" + errr.localizedDescription)
+            return request.future()
+        })
+ 
         ///move this on application session
-        channel.send("Welcome application: \(newSession.appIdentity!.key)")
+        ///self.handledSessions[idxSession].channel.send("Welcome application: \(self.handledSessions[idxSession].session.subscriptionKey)")
     }
     
     func ReConnectTo(channel: WebSocket, request: Request){}
@@ -55,7 +158,7 @@ final class ApplicationController: Service {
     final func DestroySession(appIdentity: ApplicationIdentity){
         
         /// check non empty sessions set;
-        guard (!self.appSessions.isEmpty) else {
+        /*guard (!self.appSessions.isEmpty) else {
             print("WARNING_DESTROY_SESSION: without sessions presence")
             return
         }
@@ -68,6 +171,6 @@ final class ApplicationController: Service {
             return}
         
         /// remove the session that handle closed channel
-        self.appSessions.remove(at: appSessions.firstIndex(of: toRemove!)!)
+        self.appSessions.remove(at: appSessions.firstIndex(of: toRemove!)!)*/
     }
 }

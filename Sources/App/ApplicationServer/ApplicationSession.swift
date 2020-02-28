@@ -17,97 +17,55 @@ import Vapor
 /// Only the message, when received, will be processed in FIFO mode.
 final class ApplicationSession: Hashable {
     
+    public var          key: UUID
+    public var subscriptionKey: String = ""
     public var          appIdentity: ApplicationIdentity? = nil
-    unowned private var channel: WebSocket?
+    //unowned private var channel: WebSocket?
     unowned private var appController: ApplicationController?
     private var         messageQueue: DispatchQueue?
-    private var         state: String = ""
+    private var         clientState: String = ""
     
     ///Initialize application session attribute
-    init(socket: WebSocket, controller: ApplicationController ) {
+    init(appId: ApplicationIdentity, controller: ApplicationController ) {
         
+        /// create a session key
+        self.key = UUID()
         /// Create a new application identity
-        self.appIdentity = ApplicationIdentity()
-        /// hold a socket channel
-        self.channel = socket
+        self.appIdentity = appId
+        /// SevreKey/AppIdentityKey/SessionKey
+        self.subscriptionKey = controller.key.uuidString + ":" + appId.key!.uuidString + ":" + self.key.uuidString
         /// Hold a controller for interaction
         self.appController = controller
         /// Create a thread queue named with application key
-        self.messageQueue = DispatchQueue(label: appIdentity!.key.uuidString, attributes: .concurrent)
+        self.messageQueue = DispatchQueue(label: self.key.uuidString, attributes: .concurrent)
         /// set the application state
-        self.state = "ACTIVE"
-        
-        ///************** Next connect to websocket handler**************
-        
-        ///**web socket message received**
-        socket.onText {
-            [weak self]
-            (ws, text) in
-        
-            /// the message was processed in thread with FIFO order, this is compliant to sequence messaging behavior
-            guard (self?.messageQueue != nil) else {return}
-            self!.messageQueue!.sync {
-                // Simply echo any received text
-                ws.send("\(self!.appIdentity!.key): \(text)")
-            }
-        }
-        
-        ///**websocket HeartBeat timed to 30 second**
-        socket.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(15), delay: .seconds(30)) {
-            [weak self]
-            task -> Void in
-            
-            /// check if the socket was cloded
-            guard !socket.isClosed else {
-                task.cancel()
-                return
-            }
-            
-            // send the heartbeat signal
-            socket.send(raw: (self!.appIdentity!.key.uuidString), opcode: .ping)
-        }
-        
-        ///**websocket close handler**
-        socket.onCloseCode {
-            [weak self]
-            (WebSocketErrorCode) in
-            
-            //self?.appController?.CloseSession(identity: (self!.appIdentity!))
-            self?.appController!.DestroySession(appIdentity: ((self?.appIdentity!)!))
-        }
-        
-        ///**websocket error handler**
-        socket.onError {
-            [weak self]
-            (ws, error) in
-            
-            print(error)
-        }
+        self.clientState = "ACTIVE"
     }
+       
     
     /// Destroy process of Session
     deinit {
-        print("Bye session: \(appIdentity!.key)")
+        print("Bye session: \(self.key)")
         
         ///  if socket isnt' closed close it
-        if (!self.channel!.isClosed){
-            self.channel!.close()
-        }
+        //if (!self.channel!.isClosed){
+        //    self.channel!.close()
+        //}
         
         /// Reinitialize propertyes for reallocate memory
         self.appIdentity = nil
-        self.channel = nil
+        //self.channel = nil
         self.appController = nil
     }
     
     
     /// Define the hash value
     func hash(into hasher: inout Hasher) {
-        hasher.combine(self.appIdentity!.key)
+        hasher.combine(self.key)
     }
     
     /// Implement the equalizer
     static func == (lhs: ApplicationSession, rhs: ApplicationSession) -> Bool {
-        return lhs.appIdentity!.key == rhs.appIdentity!.key
+        return lhs.key == rhs.key
     }
 }
